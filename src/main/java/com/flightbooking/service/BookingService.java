@@ -25,13 +25,17 @@ public class BookingService {
     }
 
     /**
-     * Reserve seats for a flight — booking starts as PENDING.
-     *
-     * The fair ReentrantLock inside Flight.reserveSeats() ensures FCFS ordering.
-     * The OCC version check ensures the client's view of the flight is still current.
-     * Together they prevent double-booking even under heavy concurrency.
+     * Single entry point for the user's "Book" action.
+     * Internally runs three steps in sequence:
+     *   1. OCC + fair-lock seat reservation   → PENDING
+     *   2. Immediate CAS confirmation          → CONFIRMED
+     * If step 2 fails (should never happen in normal flow since no other thread
+     * knows this booking id yet), the seats are released and the booking is
+     * cancelled to leave the system in a consistent state.
+     * The caller receives a fully CONFIRMED booking in one HTTP round-trip.
      */
-    public Booking createBooking(CreateBookingRequest request) {
+    public Booking book(CreateBookingRequest request) {
+        // ── Step 1: reserve seats (PENDING) ──────────────────────────────────
         Flight flight = flightRepository.findByFlightNumber(request.getFlightNumber())
                 .orElseThrow(() -> new FlightNotFoundException(request.getFlightNumber()));
 
@@ -44,12 +48,12 @@ public class BookingService {
         if (result == Flight.ReservationResult.NO_SEATS_AVAILABLE) {
             throw new NoSeatsAvailableException(flight.getFlightNumber(), seats, flight.getAvailableSeats());
         }
-        // result == SUCCESS — seats are now reserved
+
         List<Passenger> passengers = request.getPassengers().stream()
                 .map(p -> new Passenger(p.getFirstName(), p.getLastName(), p.getPassportNumber()))
                 .toList();
 
-        Booking booking = new Booking(
+        Booking booking = bookingRepository.save(new Booking(
                 UUID.randomUUID().toString(),
                 flight.getFlightNumber(),
                 flight.getOrigin(),
@@ -57,38 +61,32 @@ public class BookingService {
                 flight.getDepartureTime(),
                 passengers,
                 LocalDateTime.now()
-        );
+        ));
 
-        return bookingRepository.save(booking);
-    }
-
-    /**
-     * Confirm a PENDING booking (payment completed).
-     *
-     * booking.confirm() is a CAS: PENDING → CONFIRMED.
-     * If two threads call this simultaneously, exactly one CAS wins —
-     * the other gets false and throws, so double-confirm is impossible.
-     */
-    public Booking confirmBooking(String bookingId) {
-        Booking booking = bookingRepository.findById(bookingId)
-                .orElseThrow(() -> new BookingNotFoundException(bookingId));
-
-        if (booking.getStatus() == Booking.Status.CANCELLED) {
-            throw new BookingAlreadyCancelledException(bookingId);
-        }
-
-        if (!booking.confirm()) {
-            // CAS failed — status was not PENDING when we tried (already CONFIRMED)
-            throw new BookingAlreadyConfirmedException(bookingId);
+        // ── Step 2: immediately confirm (PENDING → CONFIRMED) ────────────────
+        if (!confirmBooking(booking)) {
+            // Safety net: CAS failed unexpectedly — roll back seat reservation
+            flight.releaseSeats(seats);
+            booking.cancel();
+            throw new IllegalStateException(
+                    "Booking could not be confirmed after reservation. Please try again.");
         }
 
         return booking;
     }
 
     /**
-     * Cancel a PENDING or CONFIRMED booking — releases seats back to the flight.
+     * Internally transitions a PENDING booking to CONFIRMED via CAS.
+     * Private — not exposed as an API endpoint.
+     */
+    private boolean confirmBooking(Booking booking) {
+        return booking.confirm();
+    }
+
+    /**
+     * Cancel a CONFIRMED booking — releases seats back to the flight.
      *
-     * booking.cancel() is a CAS: PENDING → CANCELLED or CONFIRMED → CANCELLED.
+     * booking.cancel() is a CAS: CONFIRMED → CANCELLED.
      * If two threads race to cancel, exactly one CAS wins —
      * the other gets false and throws, preventing double seat release.
      */
@@ -97,11 +95,9 @@ public class BookingService {
                 .orElseThrow(() -> new BookingNotFoundException(bookingId));
 
         if (!booking.cancel()) {
-            // CAS failed — booking was already CANCELLED
             throw new BookingAlreadyCancelledException(bookingId);
         }
 
-        // orElseThrow instead of ifPresent — seat release must not silently fail
         flightRepository.findByFlightNumber(booking.getFlightNumber())
                 .orElseThrow(() -> new FlightNotFoundException(booking.getFlightNumber()))
                 .releaseSeats(booking.getSeatCount());

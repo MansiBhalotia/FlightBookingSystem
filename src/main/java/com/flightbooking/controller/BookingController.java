@@ -20,28 +20,18 @@ public class BookingController {
 
     /**
      * POST /api/bookings
-     * Reserve seats → booking starts as PENDING.
-     * Client must supply flightVersion from GET /api/flights/{flightNumber}.
+     * Reserve Seats - Internally handle status transitions From Pending to Confirmed
+     * Returns 201 CONFIRMED in a single round-trip.
      */
     @PostMapping
-    public ResponseEntity<BookingResponse> createBooking(@Valid @RequestBody CreateBookingRequest request) {
+    public ResponseEntity<BookingResponse> book(@Valid @RequestBody CreateBookingRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(BookingResponse.from(bookingService.createBooking(request)));
-    }
-
-    /**
-     * POST /api/bookings/{bookingId}/confirm
-     * Mark a PENDING booking as CONFIRMED (payment completed).
-     * Returns 409 if booking is not PENDING.
-     */
-    @PostMapping("/{bookingId}/confirm")
-    public ResponseEntity<BookingResponse> confirmBooking(@PathVariable String bookingId) {
-        return ResponseEntity.ok(BookingResponse.from(bookingService.confirmBooking(bookingId)));
+                .body(BookingResponse.from(bookingService.book(request)));
     }
 
     /**
      * DELETE /api/bookings/{bookingId}
-     * Cancel a PENDING or CONFIRMED booking — releases seats back to the flight.
+     * Cancel a CONFIRMED booking — releases seats back to the flight.
      * Returns 409 if already cancelled.
      */
     @DeleteMapping("/{bookingId}")
