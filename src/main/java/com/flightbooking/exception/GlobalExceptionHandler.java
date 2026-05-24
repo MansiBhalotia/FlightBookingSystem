@@ -51,6 +51,16 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.CONFLICT, ex.getMessage());
     }
 
+    @ExceptionHandler(BookingAlreadyConfirmedException.class)
+    public ResponseEntity<ErrorResponse> handleAlreadyConfirmed(BookingAlreadyConfirmedException ex) {
+        return error(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(BookingNotPendingException.class)
+    public ResponseEntity<ErrorResponse> handleNotPending(BookingNotPendingException ex) {
+        return error(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, Object>> handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> fieldErrors = new HashMap<>();

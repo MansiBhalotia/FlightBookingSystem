@@ -1,11 +1,7 @@
 package com.flightbooking.service;
 
 import com.flightbooking.dto.CreateBookingRequest;
-import com.flightbooking.exception.BookingAlreadyCancelledException;
-import com.flightbooking.exception.BookingNotFoundException;
-import com.flightbooking.exception.FlightNotFoundException;
-import com.flightbooking.exception.NoSeatsAvailableException;
-import com.flightbooking.exception.StaleFlightDataException;
+import com.flightbooking.exception.*;
 import com.flightbooking.model.Booking;
 import com.flightbooking.model.Flight;
 import com.flightbooking.model.Passenger;
@@ -28,25 +24,27 @@ public class BookingService {
         this.flightRepository = flightRepository;
     }
 
+    /**
+     * Reserve seats for a flight — booking starts as PENDING.
+     *
+     * The fair ReentrantLock inside Flight.reserveSeats() ensures FCFS ordering.
+     * The OCC version check ensures the client's view of the flight is still current.
+     * Together they prevent double-booking even under heavy concurrency.
+     */
     public Booking createBooking(CreateBookingRequest request) {
         Flight flight = flightRepository.findByFlightNumber(request.getFlightNumber())
                 .orElseThrow(() -> new FlightNotFoundException(request.getFlightNumber()));
 
         int seats = request.getPassengers().size();
-
-        // Attempt reservation under the fair (FCFS) lock with OCC version check.
-        // The client must echo back the version it read from GET /api/flights/{flightNumber}.
-        // If another booking or cancellation happened between the client's read and now,
-        // the version will have advanced and we reject with a 409 so the client can refresh.
         Flight.ReservationResult result = flight.reserveSeats(seats, request.getFlightVersion());
 
-        switch (result) {
-            case VERSION_CONFLICT -> throw new StaleFlightDataException(flight.getFlightNumber());
-            case NO_SEATS_AVAILABLE -> throw new NoSeatsAvailableException(
-                    flight.getFlightNumber(), seats, flight.getAvailableSeats());
-            case SUCCESS -> { /* fall through to create the booking */ }
+        if (result == Flight.ReservationResult.VERSION_CONFLICT) {
+            throw new StaleFlightDataException(flight.getFlightNumber());
         }
-
+        if (result == Flight.ReservationResult.NO_SEATS_AVAILABLE) {
+            throw new NoSeatsAvailableException(flight.getFlightNumber(), seats, flight.getAvailableSeats());
+        }
+        // result == SUCCESS — seats are now reserved
         List<Passenger> passengers = request.getPassengers().stream()
                 .map(p -> new Passenger(p.getFirstName(), p.getLastName(), p.getPassportNumber()))
                 .toList();
@@ -64,23 +62,13 @@ public class BookingService {
         return bookingRepository.save(booking);
     }
 
-    public Booking cancelBooking(String bookingId) {
-        Booking booking = bookingRepository.findById(bookingId)
-                .orElseThrow(() -> new BookingNotFoundException(bookingId));
-
-        if (booking.getStatus() == Booking.Status.CANCELLED) {
-            throw new BookingAlreadyCancelledException(bookingId);
-        }
-
-        booking.setStatus(Booking.Status.CANCELLED);
-
-        // Release the seats back to the flight (also bumps the version)
-        flightRepository.findByFlightNumber(booking.getFlightNumber())
-                .ifPresent(f -> f.releaseSeats(booking.getSeatCount()));
-
-        return booking;
-    }
-
+    /**
+     * Confirm a PENDING booking (payment completed).
+     *
+     * booking.confirm() is a CAS: PENDING → CONFIRMED.
+     * If two threads call this simultaneously, exactly one CAS wins —
+     * the other gets false and throws, so double-confirm is impossible.
+     */
     public Booking confirmBooking(String bookingId) {
         Booking booking = bookingRepository.findById(bookingId)
                 .orElseThrow(() -> new BookingNotFoundException(bookingId));
@@ -88,12 +76,36 @@ public class BookingService {
         if (booking.getStatus() == Booking.Status.CANCELLED) {
             throw new BookingAlreadyCancelledException(bookingId);
         }
-        if (booking.getStatus() == Booking.Status.CONFIRMED) {
-            throw new IllegalStateException("Booking " + bookingId + " is already confirmed.");
+
+        if (!booking.confirm()) {
+            // CAS failed — status was not PENDING when we tried (already CONFIRMED)
+            throw new BookingAlreadyConfirmedException(bookingId);
         }
 
-        booking.setStatus(Booking.Status.CONFIRMED);
+        return booking;
+    }
+
+    /**
+     * Cancel a PENDING or CONFIRMED booking — releases seats back to the flight.
+     *
+     * booking.cancel() is a CAS: PENDING → CANCELLED or CONFIRMED → CANCELLED.
+     * If two threads race to cancel, exactly one CAS wins —
+     * the other gets false and throws, preventing double seat release.
+     */
+    public Booking cancelBooking(String bookingId) {
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new BookingNotFoundException(bookingId));
+
+        if (!booking.cancel()) {
+            // CAS failed — booking was already CANCELLED
+            throw new BookingAlreadyCancelledException(bookingId);
+        }
+
+        // orElseThrow instead of ifPresent — seat release must not silently fail
+        flightRepository.findByFlightNumber(booking.getFlightNumber())
+                .orElseThrow(() -> new FlightNotFoundException(booking.getFlightNumber()))
+                .releaseSeats(booking.getSeatCount());
+
         return booking;
     }
 }
-
