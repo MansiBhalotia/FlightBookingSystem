@@ -54,6 +54,9 @@ public class BookingService {
         Booking booking = new Booking(
                 UUID.randomUUID().toString(),
                 flight.getFlightNumber(),
+                flight.getOrigin(),
+                flight.getDestination(),
+                flight.getDepartureTime(),
                 passengers,
                 LocalDateTime.now()
         );
@@ -75,6 +78,21 @@ public class BookingService {
         flightRepository.findByFlightNumber(booking.getFlightNumber())
                 .ifPresent(f -> f.releaseSeats(booking.getSeatCount()));
 
+        return booking;
+    }
+
+    public Booking confirmBooking(String bookingId) {
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new BookingNotFoundException(bookingId));
+
+        if (booking.getStatus() == Booking.Status.CANCELLED) {
+            throw new BookingAlreadyCancelledException(bookingId);
+        }
+        if (booking.getStatus() == Booking.Status.CONFIRMED) {
+            throw new IllegalStateException("Booking " + bookingId + " is already confirmed.");
+        }
+
+        booking.setStatus(Booking.Status.CONFIRMED);
         return booking;
     }
 }

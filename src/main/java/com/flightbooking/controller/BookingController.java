@@ -20,28 +20,32 @@ public class BookingController {
 
     /**
      * POST /api/bookings
-     * Book seats on a flight for one or more passengers.
-     * Returns 201 Created with the booking details.
-     * Returns 404 if the flight is unknown.
-     * Returns 409 if there are not enough seats.
+     * Reserve seats → booking starts as PENDING.
+     * Client must supply flightVersion from GET /api/flights/{flightNumber}.
      */
     @PostMapping
     public ResponseEntity<BookingResponse> createBooking(@Valid @RequestBody CreateBookingRequest request) {
-        BookingResponse response = BookingResponse.from(bookingService.createBooking(request));
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(BookingResponse.from(bookingService.createBooking(request)));
+    }
+
+    /**
+     * POST /api/bookings/{bookingId}/confirm
+     * Mark a PENDING booking as CONFIRMED (payment completed).
+     * Returns 409 if booking is not PENDING.
+     */
+    @PostMapping("/{bookingId}/confirm")
+    public ResponseEntity<BookingResponse> confirmBooking(@PathVariable String bookingId) {
+        return ResponseEntity.ok(BookingResponse.from(bookingService.confirmBooking(bookingId)));
     }
 
     /**
      * DELETE /api/bookings/{bookingId}
-     * Cancel an existing booking and release its seats.
-     * Returns 200 OK with the updated booking.
-     * Returns 404 if booking does not exist.
-     * Returns 409 if the booking is already cancelled.
+     * Cancel a PENDING or CONFIRMED booking — releases seats back to the flight.
+     * Returns 409 if already cancelled.
      */
     @DeleteMapping("/{bookingId}")
     public ResponseEntity<BookingResponse> cancelBooking(@PathVariable String bookingId) {
-        BookingResponse response = BookingResponse.from(bookingService.cancelBooking(bookingId));
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok(BookingResponse.from(bookingService.cancelBooking(bookingId)));
     }
 }
-
